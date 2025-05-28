@@ -1,0 +1,375 @@
+# docker-compose.yml
+version: '3.9'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: vortex-postgres
+    environment:
+      POSTGRES_DB: vortex
+      POSTGRES_USER: vortex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-vortex_secret}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - vortex-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vortex"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: vortex-redis
+    command: redis-server --requirepass ${REDIS_PASSWORD:-redis_secret}
+    volumes:
+      - redis_data:/data
+    networks:
+      - vortex-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # InfluxDB for Time Series Data
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: vortex-influxdb
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: admin
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_PASSWORD:-influx_secret}
+      DOCKER_INFLUXDB_INIT_ORG: vortex
+      DOCKER_INFLUXDB_INIT_BUCKET: vortex
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:-influx_token}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+      - influxdb_config:/etc/influxdb2
+    networks:
+      - vortex-network
+    ports:
+      - "8086:8086"
+
+  # RabbitMQ Message Queue
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: vortex-rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: vortex
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-rabbit_secret}
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - vortex-network
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  # MinIO Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: vortex-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_PASSWORD:-minioadmin}
+    volumes:
+      - minio_data:/data
+    networks:
+      - vortex-network
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+
+  # Traefik Reverse Proxy
+  traefik:
+    image: traefik:v3.0
+    container_name: vortex-traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
+      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
+      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
+      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock:ro"
+      - "./letsencrypt:/letsencrypt"
+    networks:
+      - vortex-network
+
+  # Core API Service
+  core-api:
+    build:
+      context: ./services/core
+      dockerfile: Dockerfile
+    container_name: vortex-core-api
+    environment:
+      DATABASE_URL: postgres://vortex:${POSTGRES_PASSWORD:-vortex_secret}@postgres:5432/vortex?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-influx_token}
+      RABBITMQ_URL: amqp://vortex:${RABBITMQ_PASSWORD:-rabbit_secret}@rabbitmq:5672/
+      JWT_SECRET: ${JWT_SECRET}
+      ENVIRONMENT: production
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.api.rule=Host(`api.${DOMAIN}`)"
+      - "traefik.http.routers.api.entrypoints=websecure"
+      - "traefik.http.routers.api.tls.certresolver=letsencrypt"
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Auth Service
+  auth-service:
+    build:
+      context: ./services/auth
+      dockerfile: Dockerfile
+    container_name: vortex-auth
+    environment:
+      DATABASE_URL: postgres://vortex:${POSTGRES_PASSWORD:-vortex_secret}@postgres:5432/vortex?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      JWT_SECRET: ${JWT_SECRET}
+      OAUTH_GOOGLE_CLIENT_ID: ${OAUTH_GOOGLE_CLIENT_ID}
+      OAUTH_GOOGLE_CLIENT_SECRET: ${OAUTH_GOOGLE_CLIENT_SECRET}
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Analytics Service
+  analytics-service:
+    build:
+      context: ./services/analytics
+      dockerfile: Dockerfile
+    container_name: vortex-analytics
+    environment:
+      DATABASE_URL: postgres://vortex:${POSTGRES_PASSWORD:-vortex_secret}@postgres:5432/vortex?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-influx_token}
+      INFLUXDB_ORG: vortex
+      INFLUXDB_BUCKET: vortex
+      TENSORFLOW_MODEL_PATH: /models
+    volumes:
+      - ./models:/models
+    depends_on:
+      - postgres
+      - redis
+      - influxdb
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Xray Service
+  xray-service:
+    build:
+      context: ./services/xray
+      dockerfile: Dockerfile
+    container_name: vortex-xray
+    environment:
+      DATABASE_URL: postgres://vortex:${POSTGRES_PASSWORD:-vortex_secret}@postgres:5432/vortex?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      RABBITMQ_URL: amqp://vortex:${RABBITMQ_PASSWORD:-rabbit_secret}@rabbitmq:5672/
+    volumes:
+      - xray_config:/etc/xray
+      - xray_logs:/var/log/xray
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+    network_mode: host
+    restart: unless-stopped
+    cap_add:
+      - NET_ADMIN
+
+  # Billing Service
+  billing-service:
+    build:
+      context: ./services/billing
+      dockerfile: Dockerfile
+    container_name: vortex-billing
+    environment:
+      DATABASE_URL: postgres://vortex:${POSTGRES_PASSWORD:-vortex_secret}@postgres:5432/vortex?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      STRIPE_WEBHOOK_SECRET: ${STRIPE_WEBHOOK_SECRET}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET}
+    depends_on:
+      - postgres
+      - redis
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Notification Service
+  notification-service:
+    build:
+      context: ./services/notification
+      dockerfile: Dockerfile
+    container_name: vortex-notification
+    environment:
+      DATABASE_URL: postgres://vortex:${POSTGRES_PASSWORD:-vortex_secret}@postgres:5432/vortex?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      RABBITMQ_URL: amqp://vortex:${RABBITMQ_PASSWORD:-rabbit_secret}@rabbitmq:5672/
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASS: ${SMTP_PASS}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      FIREBASE_CREDENTIALS: ${FIREBASE_CREDENTIALS}
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Monitor Service
+  monitor-service:
+    build:
+      context: ./services/monitor
+      dockerfile: Dockerfile
+    container_name: vortex-monitor
+    environment:
+      DATABASE_URL: postgres://vortex:${POSTGRES_PASSWORD:-vortex_secret}@postgres:5432/vortex?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-redis_secret}@redis:6379
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-influx_token}
+      PROMETHEUS_URL: http://prometheus:9090
+    depends_on:
+      - postgres
+      - redis
+      - influxdb
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Web Frontend
+  web-frontend:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    container_name: vortex-web
+    environment:
+      NEXT_PUBLIC_API_URL: https://api.${DOMAIN}
+      NEXT_PUBLIC_WS_URL: wss://api.${DOMAIN}/ws
+      NEXT_PUBLIC_GRAPHQL_URL: https://api.${DOMAIN}/graphql
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=Host(`${DOMAIN}`)"
+      - "traefik.http.routers.web.entrypoints=websecure"
+      - "traefik.http.routers.web.tls.certresolver=letsencrypt"
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Admin Dashboard
+  admin-dashboard:
+    build:
+      context: ./apps/admin
+      dockerfile: Dockerfile
+    container_name: vortex-admin
+    environment:
+      NEXT_PUBLIC_API_URL: https://api.${DOMAIN}
+      NEXT_PUBLIC_GRAPHQL_URL: https://api.${DOMAIN}/graphql
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.admin.rule=Host(`admin.${DOMAIN}`)"
+      - "traefik.http.routers.admin.entrypoints=websecure"
+      - "traefik.http.routers.admin.tls.certresolver=letsencrypt"
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: vortex-prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+  # Grafana
+  grafana:
+    image: grafana/grafana:latest
+    container_name: vortex-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.grafana.rule=Host(`grafana.${DOMAIN}`)"
+      - "traefik.http.routers.grafana.entrypoints=websecure"
+      - "traefik.http.routers.grafana.tls.certresolver=letsencrypt"
+    networks:
+      - vortex-network
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+  # Jaeger Tracing
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: vortex-jaeger
+    environment:
+      COLLECTOR_ZIPKIN_HOST_PORT: :9411
+    ports:
+      - "5775:5775/udp"
+      - "6831:6831/udp"
+      - "6832:6832/udp"
+      - "5778:5778"
+      - "16686:16686"
+      - "14268:14268"
+      - "14250:14250"
+      - "9411:9411"
+    networks:
+      - vortex-network
+    restart: unless-stopped
+
+networks:
+  vortex-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  influxdb_data:
+  influxdb_config:
+  rabbitmq_data:
+  minio_data:
+  xray_config:
+  xray_logs:
+  prometheus_data:
+  grafana_data:

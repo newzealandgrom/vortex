@@ -1,0 +1,133 @@
+import type { Metadata } from 'next'
+import { Inter } from 'next/font/google'
+import './globals.css'
+import { Providers } from '@/components/providers'
+import { Toaster } from 'react-hot-toast'
+import { cn } from '@/lib/utils'
+
+const inter = Inter({ 
+  subsets: ['latin', 'cyrillic'],
+  variable: '--font-sans',
+})
+
+export const metadata: Metadata = {
+  title: {
+    default: 'VortexPanel - Modern VPN Management',
+    template: '%s | VortexPanel'
+  },
+  description: 'Next-generation VPN panel with advanced features for managing Xray/V2Ray servers',
+  keywords: ['VPN', 'Xray', 'V2Ray', 'Panel', 'Management', 'VortexPanel'],
+  authors: [{ name: 'VortexPanel Team' }],
+  creator: 'VortexPanel',
+  publisher: 'VortexPanel',
+  formatDetection: {
+    email: false,
+    address: false,
+    telephone: false,
+  },
+  metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'),
+  openGraph: {
+    title: 'VortexPanel - Modern VPN Management',
+    description: 'Next-generation VPN panel with advanced features',
+    url: '/',
+    siteName: 'VortexPanel',
+    images: [
+      {
+        url: '/og-image.png',
+        width: 1200,
+        height: 630,
+        alt: 'VortexPanel',
+      }
+    ],
+    locale: 'en_US',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: 'VortexPanel - Modern VPN Management',
+    description: 'Next-generation VPN panel with advanced features',
+    images: ['/og-image.png'],
+    creator: '@vortexpanel',
+  },
+  robots: {
+    index: true,
+    follow: true,
+    googleBot: {
+      index: true,
+      follow: true,
+      'max-video-preview': -1,
+      'max-image-preview': 'large',
+      'max-snippet': -1,
+    },
+  },
+  icons: {
+    icon: [
+      { url: '/favicon.ico' },
+      { url: '/icon-16x16.png', sizes: '16x16', type: 'image/png' },
+      { url: '/icon-32x32.png', sizes: '32x32', type: 'image/png' },
+    ],
+    apple: [
+      { url: '/apple-icon.png' },
+    ],
+    other: [
+      {
+        rel: 'mask-icon',
+        url: '/safari-pinned-tab.svg',
+      },
+    ],
+  },
+  manifest: '/manifest.json',
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#ffffff' },
+    { media: '(prefers-color-scheme: dark)', color: '#0f172a' },
+  ],
+  viewport: {
+    width: 'device-width',
+    initialScale: 1,
+    maximumScale: 1,
+    userScalable: false,
+  },
+}
+
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode
+}) {
+  return (
+    <html lang="en" suppressHydrationWarning>
+      <head />
+      <body className={cn(
+        'min-h-screen bg-background font-sans antialiased',
+        inter.variable
+      )}>
+        <Providers>
+          {children}
+          <Toaster
+            position="top-right"
+            toastOptions={{
+              duration: 4000,
+              style: {
+                background: 'hsl(var(--background))',
+                color: 'hsl(var(--foreground))',
+                border: '1px solid hsl(var(--border))',
+              },
+              success: {
+                iconTheme: {
+                  primary: 'hsl(var(--success-500))',
+                  secondary: 'white',
+                },
+              },
+              error: {
+                iconTheme: {
+                  primary: 'hsl(var(--destructive))',
+                  secondary: 'white',
+                },
+              },
+            }}
+          />
+        </Providers>
+      </body>
+    </html>
+  )
+}

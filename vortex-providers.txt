@@ -1,0 +1,48 @@
+'use client'
+
+import { ThemeProvider } from 'next-themes'
+import { ApolloProvider } from '@apollo/client'
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { ReactQueryDevtools } from '@tanstack/react-query-devtools'
+import { useState } from 'react'
+import { apolloClient } from '@/lib/apollo-client'
+import { AuthProvider } from '@/contexts/auth-context'
+import { WebSocketProvider } from '@/contexts/websocket-context'
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  const [queryClient] = useState(() => new QueryClient({
+    defaultOptions: {
+      queries: {
+        staleTime: 60 * 1000, // 1 minute
+        cacheTime: 5 * 60 * 1000, // 5 minutes
+        retry: 3,
+        retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+        refetchOnWindowFocus: false,
+      },
+      mutations: {
+        retry: 3,
+        retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+      },
+    },
+  }))
+
+  return (
+    <ThemeProvider
+      attribute="class"
+      defaultTheme="system"
+      enableSystem
+      disableTransitionOnChange
+    >
+      <QueryClientProvider client={queryClient}>
+        <ApolloProvider client={apolloClient}>
+          <AuthProvider>
+            <WebSocketProvider>
+              {children}
+            </WebSocketProvider>
+          </AuthProvider>
+        </ApolloProvider>
+        <ReactQueryDevtools initialIsOpen={false} />
+      </QueryClientProvider>
+    </ThemeProvider>
+  )
+}

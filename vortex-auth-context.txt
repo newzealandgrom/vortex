@@ -1,0 +1,274 @@
+'use client'
+
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react'
+import { useRouter } from 'next/navigation'
+import { useMutation, useQuery } from '@apollo/client'
+import { getCookie, setCookie, removeCookie } from '@/lib/cookies'
+import { LOGIN_MUTATION, LOGOUT_MUTATION, ME_QUERY, REFRESH_TOKEN_MUTATION } from '@/graphql/auth'
+import toast from 'react-hot-toast'
+import { clearApolloCache } from '@/lib/apollo-client'
+
+interface User {
+  id: string
+  email: string
+  username: string
+  role: 'ADMIN' | 'MODERATOR' | 'USER'
+  status: 'ACTIVE' | 'SUSPENDED' | 'DELETED'
+  profile?: {
+    firstName?: string
+    lastName?: string
+    avatar?: string
+    language: string
+    timezone: string
+  }
+  twoFactorEnabled: boolean
+}
+
+interface AuthContextType {
+  user: User | null
+  loading: boolean
+  isAuthenticated: boolean
+  login: (username: string, password: string, totpCode?: string) => Promise<void>
+  logout: () => Promise<void>
+  refreshToken: () => Promise<void>
+  updateUser: (user: User) => void
+}
+
+const AuthContext = createContext<AuthContextType | undefined>(undefined)
+
+export function AuthProvider({ children }: { children: React.ReactNode }) {
+  const router = useRouter()
+  const [user, setUser] = useState<User | null>(null)
+  const [loading, setLoading] = useState(true)
+
+  // GraphQL mutations
+  const [loginMutation] = useMutation(LOGIN_MUTATION)
+  const [logoutMutation] = useMutation(LOGOUT_MUTATION)
+  const [refreshTokenMutation] = useMutation(REFRESH_TOKEN_MUTATION)
+
+  // Query для получения текущего пользователя
+  const { data: meData, loading: meLoading, error: meError, refetch: refetchMe } = useQuery(ME_QUERY, {
+    skip: !getCookie('access_token'),
+    errorPolicy: 'ignore',
+  })
+
+  // Инициализация пользователя при загрузке
+  useEffect(() => {
+    if (!meLoading) {
+      if (meData?.me) {
+        setUser(meData.me)
+      } else if (meError) {
+        // Попытка обновить токен
+        const refreshToken = getCookie('refresh_token')
+        if (refreshToken) {
+          handleRefreshToken()
+        }
+      }
+      setLoading(false)
+    }
+  }, [meData, meLoading, meError])
+
+  // Автоматическое обновление токена
+  useEffect(() => {
+    const accessToken = getCookie('access_token')
+    if (!accessToken) return
+
+    // Декодируем токен для проверки времени истечения
+    try {
+      const payload = JSON.parse(atob(accessToken.split('.')[1]))
+      const expiresAt = payload.exp * 1000
+      const now = Date.now()
+      const timeUntilExpiry = expiresAt - now
+
+      // Обновляем токен за 5 минут до истечения
+      if (timeUntilExpiry > 0 && timeUntilExpiry < 5 * 60 * 1000) {
+        handleRefreshToken()
+      } else if (timeUntilExpiry > 0) {
+        // Устанавливаем таймер для обновления токена
+        const timeout = setTimeout(() => {
+          handleRefreshToken()
+        }, timeUntilExpiry - 5 * 60 * 1000)
+
+        return () => clearTimeout(timeout)
+      }
+    } catch (error) {
+      console.error('Error decoding token:', error)
+    }
+  }, [user])
+
+  const login = useCallback(async (username: string, password: string, totpCode?: string) => {
+    try {
+      const { data } = await loginMutation({
+        variables: {
+          input: {
+            username,
+            password,
+            totpCode,
+          },
+        },
+      })
+
+      if (data?.login) {
+        const { user, accessToken, refreshToken } = data.login
+
+        // Сохраняем токены
+        setCookie('access_token', accessToken, { 
+          expires: 15, // 15 минут
+          sameSite: 'lax',
+          secure: process.env.NODE_ENV === 'production',
+        })
+        setCookie('refresh_token', refreshToken, { 
+          expires: 7 * 24 * 60, // 7 дней
+          sameSite: 'lax',
+          secure: process.env.NODE_ENV === 'production',
+        })
+
+        setUser(user)
+        toast.success(`Добро пожаловать, ${user.username}!`)
+        
+        // Перенаправление на дашборд
+        router.push('/dashboard')
+      }
+    } catch (error: any) {
+      if (error.message.includes('2FA')) {
+        throw new Error('2FA_REQUIRED')
+      }
+      throw error
+    }
+  }, [loginMutation, router])
+
+  const logout = useCallback(async () => {
+    try {
+      await logoutMutation()
+    } catch (error) {
+      console.error('Logout error:', error)
+    } finally {
+      // Очищаем токены и состояние
+      removeCookie('access_token')
+      removeCookie('refresh_token')
+      setUser(null)
+      clearApolloCache()
+      
+      // Перенаправление на страницу логина
+      router.push('/auth/login')
+      toast.success('Вы успешно вышли из системы')
+    }
+  }, [logoutMutation, router])
+
+  const handleRefreshToken = useCallback(async () => {
+    const refreshToken = getCookie('refresh_token')
+    if (!refreshToken) {
+      setLoading(false)
+      return
+    }
+
+    try {
+      const { data } = await refreshTokenMutation({
+        variables: {
+          token: refreshToken,
+        },
+      })
+
+      if (data?.refreshToken) {
+        const { accessToken, refreshToken: newRefreshToken } = data.refreshToken
+
+        // Обновляем токены
+        setCookie('access_token', accessToken, { 
+          expires: 15,
+          sameSite: 'lax',
+          secure: process.env.NODE_ENV === 'production',
+        })
+        setCookie('refresh_token', newRefreshToken, { 
+          expires: 7 * 24 * 60,
+          sameSite: 'lax',
+          secure: process.env.NODE_ENV === 'production',
+        })
+
+        // Перезапрашиваем данные пользователя
+        await refetchMe()
+      }
+    } catch (error) {
+      console.error('Failed to refresh token:', error)
+      removeCookie('access_token')
+      removeCookie('refresh_token')
+      setUser(null)
+      router.push('/auth/login')
+    }
+  }, [refreshTokenMutation, refetchMe, router])
+
+  const updateUser = useCallback((updatedUser: User) => {
+    setUser(updatedUser)
+  }, [])
+
+  const value: AuthContextType = {
+    user,
+    loading,
+    isAuthenticated: !!user,
+    login,
+    logout,
+    refreshToken: handleRefreshToken,
+    updateUser,
+  }
+
+  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>
+}
+
+export function useAuth() {
+  const context = useContext(AuthContext)
+  if (context === undefined) {
+    throw new Error('useAuth must be used within an AuthProvider')
+  }
+  return context
+}
+
+// HOC для защищенных роутов
+export function withAuth<P extends object>(
+  Component: React.ComponentType<P>,
+  options?: {
+    redirectTo?: string
+    roles?: Array<'ADMIN' | 'MODERATOR' | 'USER'>
+  }
+) {
+  return function WithAuthComponent(props: P) {
+    const { user, loading, isAuthenticated } = useAuth()
+    const router = useRouter()
+
+    useEffect(() => {
+      if (!loading && !isAuthenticated) {
+        router.push(options?.redirectTo || '/auth/login')
+      } else if (!loading && isAuthenticated && options?.roles) {
+        // Проверка ролей
+        if (!options.roles.includes(user!.role)) {
+          router.push('/unauthorized')
+        }
+      }
+    }, [loading, isAuthenticated, user, router])
+
+    if (loading) {
+      return (
+        <div className="flex items-center justify-center min-h-screen">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-primary"></div>
+        </div>
+      )
+    }
+
+    if (!isAuthenticated) {
+      return null
+    }
+
+    if (options?.roles && !options.roles.includes(user!.role)) {
+      return null
+    }
+
+    return <Component {...props} />
+  }
+}
+
+// Hook для проверки разрешений
+export function usePermission(roles?: Array<'ADMIN' | 'MODERATOR' | 'USER'>): boolean {
+  const { user } = useAuth()
+  
+  if (!user || !roles) return true
+  
+  return roles.includes(user.role)
+}

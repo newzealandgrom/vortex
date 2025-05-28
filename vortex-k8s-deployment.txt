@@ -1,0 +1,654 @@
+# kubernetes/namespace.yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: vortex-panel
+  labels:
+    name: vortex-panel
+
+---
+# kubernetes/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vortex-config
+  namespace: vortex-panel
+data:
+  ENVIRONMENT: "production"
+  INFLUXDB_ORG: "vortex"
+  INFLUXDB_BUCKET: "vortex"
+  LOG_LEVEL: "info"
+
+---
+# kubernetes/secrets.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: vortex-secrets
+  namespace: vortex-panel
+type: Opaque
+stringData:
+  POSTGRES_PASSWORD: "your-postgres-password"
+  REDIS_PASSWORD: "your-redis-password"
+  INFLUXDB_TOKEN: "your-influxdb-token"
+  RABBITMQ_PASSWORD: "your-rabbitmq-password"
+  JWT_SECRET: "your-jwt-secret"
+  STRIPE_SECRET_KEY: "your-stripe-secret"
+  TELEGRAM_BOT_TOKEN: "your-telegram-token"
+
+---
+# kubernetes/postgres-deployment.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: vortex-panel
+spec:
+  serviceName: postgres
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:16-alpine
+        env:
+        - name: POSTGRES_DB
+          value: vortex
+        - name: POSTGRES_USER
+          value: vortex
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: POSTGRES_PASSWORD
+        - name: PGDATA
+          value: /var/lib/postgresql/data/pgdata
+        ports:
+        - containerPort: 5432
+          name: postgres
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+
+---
+# kubernetes/postgres-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: vortex-panel
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  clusterIP: None
+
+---
+# kubernetes/redis-deployment.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: vortex-panel
+spec:
+  serviceName: redis
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      initContainers:
+      - name: config
+        image: redis:7-alpine
+        command: ["sh", "-c"]
+        args:
+          - |
+            cp /tmp/redis/redis.conf /etc/redis/redis.conf
+            echo "requirepass $REDIS_PASSWORD" >> /etc/redis/redis.conf
+            echo "masterauth $REDIS_PASSWORD" >> /etc/redis/redis.conf
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: REDIS_PASSWORD
+        volumeMounts:
+        - name: redis-config
+          mountPath: /etc/redis/
+        - name: config
+          mountPath: /tmp/redis/
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        command: ["redis-server", "/etc/redis/redis.conf"]
+        ports:
+        - containerPort: 6379
+          name: redis
+        volumeMounts:
+        - name: redis-data
+          mountPath: /data
+        - name: redis-config
+          mountPath: /etc/redis/
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+      volumes:
+      - name: config
+        configMap:
+          name: redis-config
+      - name: redis-config
+        emptyDir: {}
+  volumeClaimTemplates:
+  - metadata:
+      name: redis-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+
+---
+# kubernetes/redis-configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: vortex-panel
+data:
+  redis.conf: |
+    maxmemory 512mb
+    maxmemory-policy allkeys-lru
+    save 900 1
+    save 300 10
+    save 60 10000
+    appendonly yes
+    appendfilename "appendonly.aof"
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+
+---
+# kubernetes/redis-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: vortex-panel
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  clusterIP: None
+
+---
+# kubernetes/influxdb-deployment.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: influxdb
+  namespace: vortex-panel
+spec:
+  serviceName: influxdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app: influxdb
+  template:
+    metadata:
+      labels:
+        app: influxdb
+    spec:
+      containers:
+      - name: influxdb
+        image: influxdb:2.7-alpine
+        env:
+        - name: DOCKER_INFLUXDB_INIT_MODE
+          value: setup
+        - name: DOCKER_INFLUXDB_INIT_USERNAME
+          value: admin
+        - name: DOCKER_INFLUXDB_INIT_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: INFLUXDB_PASSWORD
+        - name: DOCKER_INFLUXDB_INIT_ORG
+          value: vortex
+        - name: DOCKER_INFLUXDB_INIT_BUCKET
+          value: vortex
+        - name: DOCKER_INFLUXDB_INIT_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: INFLUXDB_TOKEN
+        ports:
+        - containerPort: 8086
+          name: influxdb
+        volumeMounts:
+        - name: influxdb-storage
+          mountPath: /var/lib/influxdb2
+        - name: influxdb-config
+          mountPath: /etc/influxdb2
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+  volumeClaimTemplates:
+  - metadata:
+      name: influxdb-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 50Gi
+  - metadata:
+      name: influxdb-config
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+
+---
+# kubernetes/core-api-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: core-api
+  namespace: vortex-panel
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: core-api
+  template:
+    metadata:
+      labels:
+        app: core-api
+    spec:
+      containers:
+      - name: core-api
+        image: vortexpanel/core-api:latest
+        env:
+        - name: DATABASE_URL
+          value: "postgres://vortex:$(POSTGRES_PASSWORD)@postgres:5432/vortex?sslmode=disable"
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis:6379"
+        - name: INFLUXDB_URL
+          value: "http://influxdb:8086"
+        - name: INFLUXDB_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: INFLUXDB_TOKEN
+        - name: RABBITMQ_URL
+          value: "amqp://vortex:$(RABBITMQ_PASSWORD)@rabbitmq:5672/"
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: JWT_SECRET
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: POSTGRES_PASSWORD
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: REDIS_PASSWORD
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: RABBITMQ_PASSWORD
+        ports:
+        - containerPort: 8080
+          name: http
+        - containerPort: 8081
+          name: grpc
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+
+---
+# kubernetes/core-api-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: core-api
+  namespace: vortex-panel
+spec:
+  selector:
+    app: core-api
+  ports:
+  - name: http
+    port: 80
+    targetPort: 8080
+  - name: grpc
+    port: 8081
+    targetPort: 8081
+  type: ClusterIP
+
+---
+# kubernetes/xray-deployment.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: xray-service
+  namespace: vortex-panel
+spec:
+  selector:
+    matchLabels:
+      app: xray-service
+  template:
+    metadata:
+      labels:
+        app: xray-service
+    spec:
+      hostNetwork: true
+      containers:
+      - name: xray
+        image: vortexpanel/xray-service:latest
+        env:
+        - name: DATABASE_URL
+          value: "postgres://vortex:$(POSTGRES_PASSWORD)@postgres:5432/vortex?sslmode=disable"
+        - name: REDIS_URL
+          value: "redis://:$(REDIS_PASSWORD)@redis:6379"
+        - name: RABBITMQ_URL
+          value: "amqp://vortex:$(RABBITMQ_PASSWORD)@rabbitmq:5672/"
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: POSTGRES_PASSWORD
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: REDIS_PASSWORD
+        - name: RABBITMQ_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: vortex-secrets
+              key: RABBITMQ_PASSWORD
+        volumeMounts:
+        - name: xray-config
+          mountPath: /etc/xray
+        - name: xray-logs
+          mountPath: /var/log/xray
+        securityContext:
+          capabilities:
+            add:
+            - NET_ADMIN
+            - SYS_TIME
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+      volumes:
+      - name: xray-config
+        persistentVolumeClaim:
+          claimName: xray-config-pvc
+      - name: xray-logs
+        persistentVolumeClaim:
+          claimName: xray-logs-pvc
+
+---
+# kubernetes/xray-pvc.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: xray-config-pvc
+  namespace: vortex-panel
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
+
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: xray-logs-pvc
+  namespace: vortex-panel
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 20Gi
+
+---
+# kubernetes/web-frontend-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web-frontend
+  namespace: vortex-panel
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: web-frontend
+  template:
+    metadata:
+      labels:
+        app: web-frontend
+    spec:
+      containers:
+      - name: web
+        image: vortexpanel/web-frontend:latest
+        env:
+        - name: NEXT_PUBLIC_API_URL
+          value: "https://api.vortexpanel.com"
+        - name: NEXT_PUBLIC_WS_URL
+          value: "wss://api.vortexpanel.com/ws"
+        - name: NEXT_PUBLIC_GRAPHQL_URL
+          value: "https://api.vortexpanel.com/graphql"
+        ports:
+        - containerPort: 3000
+          name: http
+        resources:
+          requests:
+            memory: "128Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+
+---
+# kubernetes/web-frontend-service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web-frontend
+  namespace: vortex-panel
+spec:
+  selector:
+    app: web-frontend
+  ports:
+  - port: 80
+    targetPort: 3000
+  type: ClusterIP
+
+---
+# kubernetes/ingress.yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vortex-ingress
+  namespace: vortex-panel
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "600"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+spec:
+  tls:
+  - hosts:
+    - vortexpanel.com
+    - api.vortexpanel.com
+    - admin.vortexpanel.com
+    - grafana.vortexpanel.com
+    secretName: vortex-tls
+  rules:
+  - host: vortexpanel.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: web-frontend
+            port:
+              number: 80
+  - host: api.vortexpanel.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: core-api
+            port:
+              number: 80
+  - host: admin.vortexpanel.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: admin-dashboard
+            port:
+              number: 80
+  - host: grafana.vortexpanel.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: grafana
+            port:
+              number: 3000
+
+---
+# kubernetes/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: core-api-hpa
+  namespace: vortex-panel
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: core-api
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+---
+# kubernetes/network-policy.yaml
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: vortex-network-policy
+  namespace: vortex-panel
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: vortex-panel
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+  egress:
+  - to:
+    - namespaceSelector: {}
+  - to:
+    - podSelector: {}
+  - to:
+    ports:
+    - protocol: TCP
+      port: 53
+    - protocol: UDP
+      port: 53
