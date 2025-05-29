@@ -1,0 +1,64 @@
+{
+  "name": "vortex-panel",
+  "version": "0.1.0",
+  "description": "Next-generation VPN management panel",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "turbo run dev",
+    "build": "turbo run build",
+    "test": "turbo run test",
+    "lint": "turbo run lint",
+    "type-check": "turbo run type-check",
+    "format": "prettier --write .",
+    "clean": "turbo run clean",
+    "docker:build": "docker-compose build",
+    "docker:up": "docker-compose up -d",
+    "docker:down": "docker-compose down",
+    "docker:logs": "docker-compose logs -f",
+    "k8s:apply": "kubectl apply -f infrastructure/k8s/",
+    "k8s:delete": "kubectl delete -f infrastructure/k8s/",
+    "migrate:up": "go run tools/migration/migrate.go up",
+    "migrate:down": "go run tools/migration/migrate.go down",
+    "migrate:create": "go run tools/migration/migrate.go create",
+    "services:build": "cd services && make build-all",
+    "services:test": "cd services && make test-all"
+  },
+  "devDependencies": {
+    "@changesets/cli": "^2.27.1",
+    "@types/node": "^20.11.0",
+    "prettier": "^3.2.2",
+    "turbo": "^1.12.2",
+    "typescript": "^5.3.3"
+  },
+  "packageManager": "pnpm@8.14.1",
+  "engines": {
+    "node": ">=18.0.0",
+    "pnpm": ">=8.0.0"
+  },
+  "keywords": [
+    "vpn",
+    "xray",
+    "v2ray",
+    "panel",
+    "management",
+    "proxy",
+    "tunnel"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vortexpanel/vortex-panel.git"
+  },
+  "license": "MIT",
+  "author": {
+    "name": "VortexPanel Team",
+    "email": "team@vortexpanel.com"
+  },
+  "bugs": {
+    "url": "https://github.com/vortexpanel/vortex-panel/issues"
+  },
+  "homepage": "https://vortexpanel.com"
+}
